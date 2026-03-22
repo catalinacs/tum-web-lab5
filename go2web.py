@@ -3,6 +3,7 @@ import re
 import socket
 import ssl
 from html.parser import HTMLParser
+from urllib.parse import quote_plus
 
 
 
@@ -56,6 +57,40 @@ def _decode_chunked(body):
         result.append(data[start : start + chunk_size])
         data = data[start + chunk_size + 2:]  # skip chunk data + trailing CRLF
     return b"".join(result).decode("utf-8", errors="replace")
+
+
+class _SearchResultParser(HTMLParser):
+    """Extract result titles and URLs from DuckDuckGo's HTML search page."""
+
+    def __init__(self):
+        super().__init__()
+        self.results = []          # list of (title, url)
+        self._in_result_link = False
+        self._current_url = None
+        self._current_title_parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            attr_dict = dict(attrs)
+            cls = attr_dict.get("class", "")
+            href = attr_dict.get("href", "")
+            if "result__a" in cls and href:
+                self._in_result_link = True
+                self._current_url = href
+                self._current_title_parts = []
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._in_result_link:
+            self._in_result_link = False
+            title = "".join(self._current_title_parts).strip()
+            if title and self._current_url:
+                self.results.append((title, self._current_url))
+            self._current_url = None
+            self._current_title_parts = []
+
+    def handle_data(self, data):
+        if self._in_result_link:
+            self._current_title_parts.append(data)
 
 
 def parse_response(raw_response):
@@ -144,6 +179,30 @@ def fetch_url(url):
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
+def search(term):
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(term)}"
+    raw = fetch_url(url)
+
+    if "\r\n\r\n" in raw:
+        _, body = raw.split("\r\n\r\n", 1)
+    elif "\n\n" in raw:
+        _, body = raw.split("\n\n", 1)
+    else:
+        body = raw
+
+    parser = _SearchResultParser()
+    parser.feed(body)
+
+    results = parser.results[:10]
+    if not results:
+        print("No results found.")
+        return
+
+    for i, (title, url) in enumerate(results, 1):
+        print(f"{i}. {title}")
+        print(f"   {url}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="go2web",
@@ -159,7 +218,7 @@ def main():
         raw = fetch_url(args.u)
         print(parse_response(raw))
     elif args.s:
-        print(f"[placeholder] Searching for: {args.s}")
+        search(args.s)
     else:
         parser.print_help()
 
