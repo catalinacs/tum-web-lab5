@@ -145,6 +145,7 @@ def _do_request(scheme, host, port, path):
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
         f"Connection: close\r\n"
+        f"Accept-Encoding: identity\r\n"
         f"\r\n"
     )
 
@@ -183,10 +184,27 @@ def fetch_url(url, _max_redirects=10):
         if first_line_end == -1:
             break
         status_parts = raw[:first_line_end].split(None, 2)
-        status_code = status_parts[1] if len(status_parts) >= 2 else "???"
-        print(f"[debug] {url} -> {status_code}")
         if len(status_parts) < 2 or status_parts[1] not in REDIRECT_CODES:
-            return raw  # not a redirect — return as-is
+            # Not an HTTP redirect — check for JS/meta-refresh redirect in body
+            headers_end = raw.find("\r\n\r\n")
+            body = raw[headers_end + 4:] if headers_end != -1 else raw
+            headers_block = raw[:headers_end] if headers_end != -1 else ""
+            if "transfer-encoding: chunked" in headers_block.lower():
+                body = _decode_chunked(body)
+
+            # window.location.replace("url") or window.parent.location.replace("url")
+            js_match = re.search(r'location\.replace\(["\']([^"\']+)["\']', body)
+            if js_match:
+                url = js_match.group(1)
+                continue
+
+            # <meta http-equiv="refresh" content="0;url=...">
+            meta_match = re.search(r'(?i)<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\']?\d+;\s*url=([^"\'>\s]+)', body)
+            if meta_match:
+                url = meta_match.group(1)
+                continue
+
+            return raw  # no redirect found — return as-is
 
         # Extract Location header
         headers_end = raw.find("\r\n\r\n")
@@ -216,11 +234,14 @@ def search(term):
     raw = fetch_url(url)
 
     if "\r\n\r\n" in raw:
-        _, body = raw.split("\r\n\r\n", 1)
+        headers, body = raw.split("\r\n\r\n", 1)
     elif "\n\n" in raw:
-        _, body = raw.split("\n\n", 1)
+        headers, body = raw.split("\n\n", 1)
     else:
-        body = raw
+        headers, body = "", raw
+
+    if "transfer-encoding: chunked" in headers.lower():
+        body = _decode_chunked(body)
 
     parser = _SearchResultParser()
     parser.feed(body)
@@ -233,6 +254,25 @@ def search(term):
     for i, (title, url) in enumerate(results, 1):
         print(f"{i}. {title}")
         print(f"   {url}")
+
+    print()
+    try:
+        choice = input("Enter a number to open a result (or press Enter to quit): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if not choice:
+        return
+
+    if not choice.isdigit() or not (1 <= int(choice) <= len(results)):
+        print(f"Invalid choice. Please enter a number between 1 and {len(results)}.")
+        return
+
+    _, selected_url = results[int(choice) - 1]
+    if selected_url.startswith("//"):
+        selected_url = "https:" + selected_url
+    print()
+    print(parse_response(fetch_url(selected_url)))
 
 
 def main():
