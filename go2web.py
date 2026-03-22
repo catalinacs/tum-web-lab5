@@ -1,4 +1,147 @@
 import argparse
+import re
+import socket
+import ssl
+from html.parser import HTMLParser
+
+
+
+class _TextExtractor(HTMLParser):
+    # Only non-void elements whose *content* should be suppressed.
+    # Void elements (meta, link, br, img …) have no closing tag, so including
+    # them in SKIP_TAGS would permanently raise _skip_depth with no way to
+    # lower it again, causing all subsequent text to be swallowed.
+    SKIP_TAGS = {"script", "style", "noscript", "head"}
+
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, _attrs):
+        if tag in self.SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self.parts.append(data)
+
+
+def _decode_chunked(body):
+    """Reassemble a chunked transfer-encoded body into a plain string."""
+    result = []
+    # Work on bytes to avoid any multi-byte character splitting at chunk edges
+    data = body.encode("utf-8", errors="surrogateescape")
+    while data:
+        # Find the CRLF that terminates the chunk-size line
+        crlf = data.find(b"\r\n")
+        if crlf == -1:
+            break
+        size_token = data[:crlf].split(b";")[0].strip()
+        if not size_token:
+            break
+        try:
+            chunk_size = int(size_token, 16)
+        except ValueError:
+            break
+        if chunk_size == 0:
+            break
+        start = crlf + 2
+        result.append(data[start : start + chunk_size])
+        data = data[start + chunk_size + 2:]  # skip chunk data + trailing CRLF
+    return b"".join(result).decode("utf-8", errors="replace")
+
+
+def parse_response(raw_response):
+    # Split headers from body on the blank line
+    if "\r\n\r\n" in raw_response:
+        headers, body = raw_response.split("\r\n\r\n", 1)
+    elif "\n\n" in raw_response:
+        headers, body = raw_response.split("\n\n", 1)
+    else:
+        headers, body = "", raw_response
+
+    # Decode chunked transfer encoding if indicated by the headers
+    if "transfer-encoding: chunked" in headers.lower():
+        body = _decode_chunked(body)
+
+    extractor = _TextExtractor()
+    extractor.feed(body)
+    text = "".join(extractor.parts)
+
+    # Collapse runs of blank lines down to a single blank line
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def fetch_url(url):
+    # Parse scheme
+    if url.startswith("https://"):
+        scheme = "https"
+        default_port = 443
+        rest = url[len("https://"):]
+    elif url.startswith("http://"):
+        scheme = "http"
+        default_port = 80
+        rest = url[len("http://"):]
+    else:
+        raise ValueError(f"Unsupported scheme in URL: {url}")
+
+    # Split host[:port] from path
+    slash_idx = rest.find("/")
+    if slash_idx == -1:
+        host_part = rest
+        path = "/"
+    else:
+        host_part = rest[:slash_idx]
+        path = rest[slash_idx:]
+
+    # Split optional port from host
+    if ":" in host_part:
+        host, port_str = host_part.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = host_part
+        port = default_port
+
+    # Build HTTP/1.1 request
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+    )
+
+    # Open raw TCP socket
+    raw_sock = socket.create_connection((host, port), timeout=10)
+
+    if scheme == "https":
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        sock = context.wrap_socket(raw_sock, server_hostname=host)
+    else:
+        sock = raw_sock
+
+    try:
+        sock.sendall(request.encode("utf-8"))
+
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        sock.close()
+
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def main():
@@ -13,7 +156,8 @@ def main():
     args = parser.parse_args()
 
     if args.u:
-        print(f"[placeholder] Fetching URL: {args.u}")
+        raw = fetch_url(args.u)
+        print(parse_response(raw))
     elif args.s:
         print(f"[placeholder] Searching for: {args.s}")
     else:
