@@ -115,37 +115,32 @@ def parse_response(raw_response):
     return text.strip()
 
 
-def fetch_url(url):
-    # Parse scheme
+def _parse_url(url):
+    """Return (scheme, host, port, path) for an http/https URL."""
     if url.startswith("https://"):
-        scheme = "https"
-        default_port = 443
-        rest = url[len("https://"):]
+        scheme, default_port, rest = "https", 443, url[8:]
     elif url.startswith("http://"):
-        scheme = "http"
-        default_port = 80
-        rest = url[len("http://"):]
+        scheme, default_port, rest = "http", 80, url[7:]
     else:
         raise ValueError(f"Unsupported scheme in URL: {url}")
 
-    # Split host[:port] from path
     slash_idx = rest.find("/")
     if slash_idx == -1:
-        host_part = rest
-        path = "/"
+        host_part, path = rest, "/"
     else:
-        host_part = rest[:slash_idx]
-        path = rest[slash_idx:]
+        host_part, path = rest[:slash_idx], rest[slash_idx:]
 
-    # Split optional port from host
     if ":" in host_part:
-        host, port_str = host_part.rsplit(":", 1)
-        port = int(port_str)
+        host, port = host_part.rsplit(":", 1)
+        port = int(port)
     else:
-        host = host_part
-        port = default_port
+        host, port = host_part, default_port
 
-    # Build HTTP/1.1 request
+    return scheme, host, port, path
+
+
+def _do_request(scheme, host, port, path):
+    """Open a socket, send a GET request, and return the raw response string."""
     request = (
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
@@ -153,9 +148,7 @@ def fetch_url(url):
         f"\r\n"
     )
 
-    # Open raw TCP socket
     raw_sock = socket.create_connection((host, port), timeout=10)
-
     if scheme == "https":
         context = ssl.create_default_context()
         context.check_hostname = False
@@ -166,7 +159,6 @@ def fetch_url(url):
 
     try:
         sock.sendall(request.encode("utf-8"))
-
         chunks = []
         while True:
             chunk = sock.recv(4096)
@@ -177,6 +169,46 @@ def fetch_url(url):
         sock.close()
 
     return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def fetch_url(url, _max_redirects=10):
+    REDIRECT_CODES = {"301", "302", "303", "307", "308"}
+
+    for _ in range(_max_redirects):
+        scheme, host, port, path = _parse_url(url)
+        raw = _do_request(scheme, host, port, path)
+
+        # Read the status line
+        first_line_end = raw.find("\r\n")
+        if first_line_end == -1:
+            break
+        status_parts = raw[:first_line_end].split(None, 2)
+        status_code = status_parts[1] if len(status_parts) >= 2 else "???"
+        print(f"[debug] {url} -> {status_code}")
+        if len(status_parts) < 2 or status_parts[1] not in REDIRECT_CODES:
+            return raw  # not a redirect — return as-is
+
+        # Extract Location header
+        headers_end = raw.find("\r\n\r\n")
+        headers_block = raw[:headers_end] if headers_end != -1 else raw
+        location = None
+        for line in headers_block.split("\r\n")[1:]:
+            if line.lower().startswith("location:"):
+                location = line[len("location:"):].strip()
+                break
+
+        if not location:
+            return raw  # redirect with no Location — give up
+
+        # Resolve relative redirects (e.g. /path or //host/path)
+        if location.startswith("//"):
+            location = scheme + ":" + location
+        elif location.startswith("/"):
+            location = f"{scheme}://{host}{'' if port in (80, 443) else f':{port}'}{location}"
+
+        url = location
+
+    raise RuntimeError(f"Exceeded maximum redirects ({_max_redirects})")
 
 
 def search(term):
