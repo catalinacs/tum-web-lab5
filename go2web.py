@@ -1,9 +1,25 @@
 import argparse
+import json
+import os
 import re
 import socket
 import ssl
 from html.parser import HTMLParser
 from urllib.parse import quote_plus
+
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache.json")
+
+
+def _load_cache():
+    if os.path.exists(_CACHE_FILE):
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_cache(cache):
+    with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
 
 
 
@@ -174,7 +190,12 @@ def _do_request(scheme, host, port, path):
 
 def fetch_url(url, _max_redirects=10):
     REDIRECT_CODES = {"301", "302", "303", "307", "308"}
+    cache = _load_cache()
 
+    if url in cache:
+        return cache[url]
+
+    original_url = url
     for _ in range(_max_redirects):
         scheme, host, port, path = _parse_url(url)
         raw = _do_request(scheme, host, port, path)
@@ -204,6 +225,8 @@ def fetch_url(url, _max_redirects=10):
                 url = meta_match.group(1)
                 continue
 
+            cache[original_url] = raw
+            _save_cache(cache)
             return raw  # no redirect found — return as-is
 
         # Extract Location header
@@ -216,6 +239,8 @@ def fetch_url(url, _max_redirects=10):
                 break
 
         if not location:
+            cache[original_url] = raw
+            _save_cache(cache)
             return raw  # redirect with no Location — give up
 
         # Resolve relative redirects (e.g. /path or //host/path)
