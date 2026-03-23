@@ -122,6 +122,13 @@ def parse_response(raw_response):
     if "transfer-encoding: chunked" in headers.lower():
         body = _decode_chunked(body)
 
+    # Pretty-print JSON responses
+    if "content-type: application/json" in headers.lower():
+        try:
+            return json.dumps(json.loads(body), indent=2)
+        except json.JSONDecodeError:
+            return body.strip()
+
     extractor = _TextExtractor()
     extractor.feed(body)
     text = "".join(extractor.parts)
@@ -161,6 +168,7 @@ def _do_request(scheme, host, port, path):
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
         f"Connection: close\r\n"
+        f"Accept: application/json, text/html\r\n"
         f"Accept-Encoding: identity\r\n"
         f"\r\n"
     )
