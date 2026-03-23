@@ -202,8 +202,10 @@ def fetch_url(url, _max_redirects=10):
     cache = _load_cache()
 
     if url in cache:
+        print("[cache hit] serving from cache")
         return cache[url]
 
+    print("[cache miss] fetching from network")
     original_url = url
     for _ in range(_max_redirects):
         scheme, host, port, path = _parse_url(url)
@@ -326,7 +328,7 @@ def main():
     elif args.s:
         search(args.s)
     else:
-        parser.print_help()
+        print("Use go2web -h for help")
 
 
 if __name__ == "__main__":
